@@ -91,3 +91,4 @@ For the final step, teams must submit a written report and give a 20-minute pres
 | Week 13 (May 12) | Distributed Inference               | *No Lab*                 |                  |
 | Week 14 (May 19) | *No Lecture*                        | *No Lab*                 |                  |
 | Week 15 (May 26) | Project presentation                | *No Lab*                 |Project report    |
+# DDLS25
