@@ -23,6 +23,8 @@ transform = transforms.Compose([
     transforms.Normalize((0.1307,), (0.3081,))
 ])
 
+# Dataset
+
 train_dataset = datasets.MNIST(data_path, train=True, download=True, transform=transform)
 test_loader = DataLoader(
     datasets.MNIST(data_path, train=False, download=False, transform=transform),
@@ -35,6 +37,7 @@ test_loader = DataLoader(
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Define Model
 
 class MnistCnn(nn.Module):
     def __init__(self):
@@ -63,7 +66,7 @@ class MnistCnn(nn.Module):
 
         return output
 
-#
+# Trainig Loop
 
 from torch.optim import Optimizer
 
@@ -79,7 +82,7 @@ def train_epoch(model: torch.nn.Module, loader: DataLoader, optimizer: Optimizer
         loss.backward()
         optimizer.step()
 
-#
+#Split IID
 
 from typing import cast
 
