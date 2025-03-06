@@ -239,11 +239,12 @@ class DecentralizedServer(Server):
 class GradientClient(Client):
     def __init__(self, client_data: Subset) -> None:
         super().__init__(client_data, len(client_data))
+        # init Client class
 
     def update(self, weights: list[torch.Tensor], seed: int) -> list[torch.Tensor]:
         with torch.no_grad():
             for client_values, server_values in zip(self.model.parameters(), weights):
-                client_values[:] = server_values
+                client_values[:] = server_values #update clients values with server values
                 client_values.grad = None
 
         # seeding is not strictly necessary here
@@ -259,7 +260,7 @@ class GradientClient(Client):
 
         return [
             cast(torch.Tensor, x.grad).detach().cpu().clone()
-            for x in self.model.parameters()]
+            for x in self.model.parameters()] #return model params
 
 #
 
@@ -318,80 +319,114 @@ class FedSgdGradientServer(DecentralizedServer):
         return run_result
 
 #
-
 class WeightClient(Client):
     def __init__(self, client_data: Subset, lr: float, batch_size: int, nr_epochs: int) -> None:
+        # Initialize the parent class (Client) with client data and batch size
         super().__init__(client_data, batch_size)
+        # Initialize the optimizer with the model parameters and learning rate
         self.optimizer = SGD(params=self.model.parameters(), lr=lr)
+        # Set the number of local epochs
         self.nr_epochs = nr_epochs
 
-
     def update(self, weights: list[torch.Tensor], seed: int) -> list[torch.Tensor]:
+        # Update the client's model parameters with the server's model parameters
         with torch.no_grad():
             for client_values, server_values in zip(self.model.parameters(), weights):
                 client_values[:] = server_values
 
+        # Set the random seed for reproducibility
         self.generator.manual_seed(seed)
 
+        # Train the model for the specified number of local epochs
         for _epoch in range(self.nr_epochs):
             train_epoch(self.model, self.loader_train, self.optimizer)
 
+        # Return the updated model parameters
         return [x.detach().cpu().clone() for x in self.model.parameters()]
-
 #
-
 class FedAvgServer(DecentralizedServer):
     def __init__(
             self, lr: float, batch_size: int, client_subsets: list[Subset],
             client_fraction: float, nr_local_epochs: int, seed: int) -> None:
+        # Initialize the parent class (DecentralizedServer)
         super().__init__(lr, batch_size, client_subsets, client_fraction, seed)
+        # Set the name of the server
         self.name = "FedAvg"
+        # Set the number of local epochs
         self.nr_local_epochs = nr_local_epochs
+        # Initialize the clients with their respective subsets, learning rate, batch size, and number of local epochs
         self.clients = [
             WeightClient(subset, lr, batch_size, nr_local_epochs)
             for subset in client_subsets]
 
     def run(self, nr_rounds: int) -> RunResult:
+        # Initialize elapsed time
         elapsed_time = 0.
+        # Create a RunResult object to store the results of the run
         run_result = RunResult(
             self.name, self.nr_clients, self.client_fraction, self.batch_size,
             self.nr_local_epochs, self.lr, self.seed)
 
+        # Iterate over the number of rounds
         for nr_round in tqdm(range(nr_rounds), desc="Rounds", leave=False):
+            # Record the start time for setup
             setup_start_time = perf_counter()
+            # Set the model to training mode
             self.model.train()
+            # Clone the current model weights
             weights = [x.detach().cpu().clone() for x in self.model.parameters()]
+            # Select a subset of clients for this round
             indices_chosen_clients = self.rng.choice(
                 self.nr_clients, self.nr_clients_per_round, replace=False)
+            # Calculate the total number of samples from the chosen clients
             chosen_sum_nr_samples = sum(
                 self.client_sample_counts[i] for i in indices_chosen_clients)
+            # Initialize a list to store the adjusted weights from the chosen clients
             chosen_adjusted_weights: list[list[torch.Tensor]] = []
+            # Update the elapsed time
             elapsed_time += perf_counter() - setup_start_time
+            # Initialize the update time
             update_time = 0.
 
+            # Iterate over the chosen clients
             for c_i in indices_chosen_clients:
+                # Record the start time for the update
                 update_start_time = perf_counter()
+                # Get the index of the client
                 ind = int(c_i)
+                # Calculate the seed for the client for this round
                 client_round_seed = self.seed + ind + 1 + nr_round * self.nr_clients_per_round
+                # Update the client's weights
                 client_weights = self.clients[ind].update(weights, client_round_seed)
+                # Adjust the client's weights based on the number of samples
                 chosen_adjusted_weights.append([
                     self.client_sample_counts[ind] / chosen_sum_nr_samples * tens
                      for tens in client_weights])
+                # Update the maximum update time
                 update_time = max(update_time, perf_counter() - update_start_time)
 
+            # Update the elapsed time
             elapsed_time += update_time
+            # Record the start time for aggregation
             aggregate_start_time = perf_counter()
+            # Average the adjusted weights from the chosen clients
             averaged_chosen_weights: list[torch.Tensor] = [
                 torch.stack(x, dim=0).sum(dim=0) for x in zip(*chosen_adjusted_weights)]
 
+            # Update the server's model with the averaged weights
             with torch.no_grad():
                 zip_weight_parameter = zip(averaged_chosen_weights, self.model.parameters())
                 for client_weight, server_parameter in zip_weight_parameter:
                     server_parameter[:] = client_weight.to(device=device)
 
+            # Update the elapsed time
             elapsed_time += perf_counter() - aggregate_start_time
+            # Record the elapsed time in the run result
             run_result.wall_time.append(round(elapsed_time, 1))
+            # Record the message count in the run result
             run_result.message_count.append(2 * (nr_round + 1) * self.nr_clients_per_round)
+            # Record the test accuracy in the run result
             run_result.test_accuracy.append(self.test())
 
+        # Return the run result
         return run_result
