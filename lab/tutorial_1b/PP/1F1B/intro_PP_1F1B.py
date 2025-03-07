@@ -22,7 +22,7 @@ n_layers = 6 // world_size # Set the number of layers per process
 seq_l = 256 # Set the sequence length
 batch_size = 3 # Set the batch size
 device = "cpu" # Set the device to CUDA
-num_microbatches = 4 # Set number of microbatches
+num_microbatches = 3 # Set number of microbatches
 microbatch_size = batch_size // num_microbatches # Set microbatch size
 
 # Initialize tokenizer and model based on rank
@@ -56,8 +56,8 @@ for itr in range(5_000): # Training loop
                 microbatches = next(iter_ds).chunk(num_microbatches) # Get next batch from dataset
                 out = torch.cat([mb.to(device) for mb in microbatches])  # Convert each tensor to device and concatenate
                 out = net.embed(out) # Embed the batch
-                print(f"Rank 0 out shape: {out.shape}") # Debug print
-                send_req = dist.isend(out[microbatch].to("cpu"), dst=1) # Send output to next stage
+                print(f"Rank 0 out shape: {out.chunk(num_microbatches)[microbatch].shape}") # Debug print
+                send_req = dist.isend(out.chunk(num_microbatches)[microbatch].to("cpu"), dst=1) # Send output to next stage
                 print(f"Rank 0 waiting to send output.") # Debug print
                 send_req.wait()  # Ensure the data is sent before proceeding
                 print("Rank 0 forward pass done.") # Debug print
@@ -66,12 +66,13 @@ for itr in range(5_000): # Training loop
 
         elif rank == 1:
             try:
-                inp_batch = torch.empty((batch_size, seq_l, dmodel)) # Create empty tensor for input batch
-                print(f"Rank 1 inp_batch shape: {inp_batch.shape}") # Debug print
-                recv_req = dist.irecv(inp_batch, src=0) # Receive input batch from previous stage
-                print(f"Rank 1 waiting to receive input batch.") # Debug print
-                recv_req.wait() # Ensure the data is received before proceeding
-                print(f"Rank {rank} received input batch.") # Debug print
+                expected_shape = (microbatch_size, seq_l, dmodel)  # Ensure it matches the microbatch
+                inp_batch = torch.empty(expected_shape)
+                print(f"Rank 1 expecting shape: {inp_batch.shape}")  # Debug
+                recv_req = dist.irecv(inp_batch, src=0)
+                recv_req.wait()
+                print(f"Rank 1 received shape: {inp_batch.shape}")  # Debug
+
                 with torch.no_grad():
                     inp_batch = inp_batch.to(device) # Move input batch to device
                     inp_batch.requires_grad_() # Enable gradient computation
@@ -87,9 +88,10 @@ for itr in range(5_000): # Training loop
 
         elif rank == 2:
             try:
-                target = next(iter_ds).chunk(num_microbatches) # Get next batch from dataset
-                target = torch.cat([t.to(device) for t in target], dim=0)  # Convert each tensor to device and concatenate
-                inp_batch = torch.empty((batch_size, seq_l, dmodel)) # Create empty tensor for input batch
+                target_microbatches = next(iter_ds).chunk(num_microbatches)  # Create microbatches
+                target = target_microbatches[microbatch].to(device)  # Select the correct one
+                # Convert each tensor to device and concatenate
+                inp_batch = torch.empty((microbatch_size, seq_l, dmodel)) # Create empty tensor for input batch
                 recv_req = dist.irecv(inp_batch, src=1) # Receive input batch from previous stage
                 print(f"Rank 2 waiting to receive input batch.") # Debug print
                 recv_req.wait() # Ensure the data is received before proceeding
@@ -117,7 +119,7 @@ for itr in range(5_000): # Training loop
                 print(f"Rank {rank} backward pass error: {e}") # Print an error message if an exception occurs
         elif rank == 1:
             try:
-                inp_grad = torch.empty((batch_size, seq_l, dmodel)) # Create empty tensor for input gradients
+                inp_grad = torch.empty((microbatch_size, seq_l, dmodel)) # Create empty tensor for input gradients
                 req_recv= dist.irecv(inp_grad, src=2) # Receive gradients from next stage
                 print(f"Rank 1 waiting to receive gradients.") # Debug print
                 req_recv.wait() # Ensure the gradients are received before proceeding
@@ -131,7 +133,7 @@ for itr in range(5_000): # Training loop
                 print(f"Rank {rank} backward pass error: {e}") # Print an error message if an exception occurs
         elif rank == 0:
             try:
-                inp_grad = torch.empty((batch_size, seq_l, dmodel)) # Create empty tensor for input gradients
+                inp_grad = torch.empty((microbatch_size, seq_l, dmodel)) # Create empty tensor for input gradients
                 req_recv= dist.irecv(inp_grad, src=1) # Receive gradients from next stage
                 print(f"Rank 0 waiting to receive gradients.") # Debug print
                 req_recv.wait() # Ensure the gradients are received before proceeding
