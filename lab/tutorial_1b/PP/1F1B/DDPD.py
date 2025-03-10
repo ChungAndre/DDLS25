@@ -10,7 +10,7 @@ from torch.optim import Adam
 
 rank = int(argv[1])
 os.environ["MASTER_ADDR"] = "localhost"
-os.environ["MASTER_PORT"] = "29500"
+os.environ["MASTER_PORT"] = "29501"
 world_size = 6 
 dist.init_process_group("gloo", rank=rank, world_size=world_size)
 num_group = 2
@@ -19,10 +19,12 @@ num_group = 2
 group_0 = dist.new_group(ranks=[0, 1, 2])
 group_1 = dist.new_group(ranks=[3, 4, 5])
 
+layer_groups = [dist.new_group(ranks=[i, i+3]) for i in range(3)]
+
 # Assign pipeline, local rank and group
 pipeline_id = rank // 3
 local_rank = rank % 3
-pipeline_group = group_0 if pipeline_id == 0 else group_1
+pipeline_group = group_0 if rank in [0, 1, 2] else group_1
 print(f"Process {rank} initialized in pipeline {pipeline_id}, local rank: {local_rank}")
 
 dmodel = 288
@@ -33,7 +35,6 @@ batch_size = 6
 device = "cpu"
 num_microbatches = 6
 microbatch_size = 1
-
 
 # Assign models
 if local_rank == 0:
@@ -123,7 +124,6 @@ for itr in range(5_000):
                 for mb_out, mb_grad in zip(out.chunk(num_microbatches), grad.chunk(num_microbatches)):  
                     mb_out.backward(mb_grad.to(device), retain_graph=True)
                     inp_batch.grad += inp_batch.grad  # Accumulate the gradients correctly
-
                 send_req = dist.isend(inp_batch.grad.to("cpu"), dst=rank - 1, group=pipeline_group) 
                 send_req.wait()
             except Exception as e:
@@ -137,9 +137,11 @@ for itr in range(5_000):
                     mb_out.backward(mb_grad.to(device), retain_graph=True)
             except Exception as e:
                 print(f"Rank {rank} backward pass error: {e}")
-    # Synchronize gradients across pipelines
-    #for param in net.parameters():
-    #    dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+                
+    for param in net.parameters():
+        if param.grad is not None:  # Ensure gradient exists
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=layer_groups[local_rank])
+
     optim.step()
     torch.cuda.empty_cache()
     print(f"Pipeline {pipeline_id} Rank {rank} finished iteration {itr}")
